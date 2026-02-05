@@ -4,6 +4,7 @@
 #include "riscv.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "getproc.h"
 #include "defs.h"
 
 struct cpu cpus[NCPU];
@@ -289,6 +290,7 @@ kfork(void)
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
+  np->tracemask = p->tracemask;
 
   pid = np->pid;
 
@@ -657,6 +659,35 @@ either_copyin(void *dst, int user_src, uint64 src, uint64 len)
     memmove(dst, (char*)src, len);
     return 0;
   }
+}
+
+// Copy process info into user-provided array.
+// Returns number of entries filled, or -1 on error.
+int
+getprocs(uint64 addr)
+{
+  struct proc *p;
+  struct procinfo info;
+  int count = 0;
+  struct proc *cur = myproc();
+
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED){
+      info.pid = p->pid;
+      info.state = p->state;
+      info.sz = p->sz;
+      safestrcpy(info.name, p->name, sizeof(info.name));
+      if(copyout(cur->pagetable, addr + count * sizeof(info), (char *)&info, sizeof(info)) < 0){
+        release(&p->lock);
+        return -1;
+      }
+      count++;
+    }
+    release(&p->lock);
+  }
+
+  return count;
 }
 
 // Print a process listing to console.  For debugging.

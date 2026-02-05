@@ -6,7 +6,7 @@
 char buf[512];
 
 void
-wc(int fd, char *name)
+wc(int fd, char *name, int show_l, int show_w, int show_c)
 {
   int i, n;
   int l, w, c, inword;
@@ -30,25 +30,80 @@ wc(int fd, char *name)
     printf("wc: read error\n");
     exit(1);
   }
-  printf("%d %d %d %s\n", l, w, c, name);
+  int printed = 0;
+  if(show_l){
+    printf("%d", l);
+    printed = 1;
+  }
+  if(show_w){
+    if(printed)
+      printf(" %d", w);
+    else
+      printf("%d", w);
+    printed = 1;
+  }
+  if(show_c){
+    if(printed)
+      printf(" %d", c);
+    else
+      printf("%d", c);
+    printed = 1;
+  }
+  if(name[0] != '\0')
+    printf(" %s", name);
+  printf("\n");
 }
 
 int
 main(int argc, char *argv[])
 {
   int fd, i;
+  int show_l = 0, show_w = 0, show_c = 0;
+  int file_count = 0;
 
-  if(argc <= 1){
-    wc(0, "");
+  for(i = 1; i < argc; i++){
+    if(argv[i][0] == '-' && argv[i][1] != '\0'){
+      int j;
+      for(j = 1; argv[i][j] != '\0'; j++){
+        if(argv[i][j] == 'l')
+          show_l = 1;
+        else if(argv[i][j] == 'w')
+          show_w = 1;
+        else if(argv[i][j] == 'c')
+          show_c = 1;
+        else
+          break;
+      }
+      if(argv[i][j] == '\0')
+        continue;
+    }
+    file_count++;
+  }
+
+  if(show_l == 0 && show_w == 0 && show_c == 0){
+    show_l = show_w = show_c = 1;
+  }
+
+  if(file_count == 0){
+    wc(0, "", show_l, show_w, show_c);
     exit(0);
   }
 
   for(i = 1; i < argc; i++){
+    if(argv[i][0] == '-' && argv[i][1] != '\0'){
+      int j;
+      for(j = 1; argv[i][j] != '\0'; j++){
+        if(argv[i][j] != 'l' && argv[i][j] != 'w' && argv[i][j] != 'c')
+          break;
+      }
+      if(argv[i][j] == '\0')
+        continue;
+    }
     if((fd = open(argv[i], O_RDONLY)) < 0){
       printf("wc: cannot open %s\n", argv[i]);
       exit(1);
     }
-    wc(fd, argv[i]);
+    wc(fd, argv[i], show_l, show_w, show_c);
     close(fd);
   }
   exit(0);
