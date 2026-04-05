@@ -7,6 +7,9 @@
 #include "proc.h"
 #include "vm.h"
 
+#define SHMEM_MAX_REGIONS 32
+#define SHMEM_BASE (TRAPFRAME - SHMEM_MAX_REGIONS * PGSIZE)
+
 uint64
 sys_exit(void)
 {
@@ -57,7 +60,7 @@ sys_sbrk(void)
     // memory, vmfault() will allocate it.
     if(addr + n < addr)
       return -1;
-    if(addr + n > TRAPFRAME)
+    if(addr + n > SHMEM_BASE)
       return -1;
     myproc()->sz += n;
   }
@@ -125,4 +128,19 @@ sys_getprocs(void)
 
   argaddr(0, &addr);
   return getprocs(addr);
+}
+
+uint64
+sys_mmap(void)
+{
+  return mmap();
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 va;
+
+  argaddr(0, &va);
+  return munmap(va);
 }

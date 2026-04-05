@@ -44,3 +44,5 @@ entry("pause");
 entry("uptime");
 entry("trace");
 entry("getprocs");
+entry("mmap");
+entry("munmap");

@@ -17,6 +17,138 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+#define SHMEM_MAX_REGIONS 32
+#define SHMEM_BASE (TRAPFRAME - SHMEM_MAX_REGIONS * PGSIZE)
+#define SHMEM_END  TRAPFRAME
+
+struct shmem_region {
+  uint64 pa;
+  int refcount;
+  int allocated;
+};
+
+struct {
+  struct spinlock lock;
+  struct shmem_region regions[SHMEM_MAX_REGIONS];
+} shmem_state;
+
+static int
+is_shmem_va(uint64 va)
+{
+  return va >= SHMEM_BASE && va < SHMEM_END && (va % PGSIZE) == 0;
+}
+
+static int
+find_shared_region_by_pa(uint64 pa)
+{
+  for(int i = 0; i < SHMEM_MAX_REGIONS; i++){
+    if(shmem_state.regions[i].allocated && shmem_state.regions[i].pa == pa)
+      return i;
+  }
+  return -1;
+}
+
+static uint64
+find_free_shmem_va(pagetable_t pagetable)
+{
+  for(uint64 va = SHMEM_BASE; va < SHMEM_END; va += PGSIZE){
+    pte_t *pte = walk(pagetable, va, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0)
+      return va;
+  }
+  return 0;
+}
+
+void
+init_shmem(void)
+{
+  initlock(&shmem_state.lock, "shmem");
+  for(int i = 0; i < SHMEM_MAX_REGIONS; i++){
+    shmem_state.regions[i].pa = 0;
+    shmem_state.regions[i].refcount = 0;
+    shmem_state.regions[i].allocated = 0;
+  }
+}
+
+uint64
+mmap(void)
+{
+  struct proc *p = myproc();
+  uint64 va, pa;
+  int region = -1;
+  char *mem;
+
+  va = find_free_shmem_va(p->pagetable);
+  if(va == 0)
+    return 0;
+
+  mem = kalloc();
+  if(mem == 0)
+    return 0;
+  memset(mem, 0, PGSIZE);
+
+  acquire(&shmem_state.lock);
+  for(int i = 0; i < SHMEM_MAX_REGIONS; i++){
+    if(!shmem_state.regions[i].allocated){
+      region = i;
+      break;
+    }
+  }
+  if(region < 0){
+    release(&shmem_state.lock);
+    kfree(mem);
+    return 0;
+  }
+
+  shmem_state.regions[region].pa = (uint64)mem;
+  shmem_state.regions[region].allocated = 1;
+  shmem_state.regions[region].refcount = 1;
+  pa = shmem_state.regions[region].pa;
+  release(&shmem_state.lock);
+
+  if(mappages(p->pagetable, va, PGSIZE, pa, PTE_R | PTE_W | PTE_U) != 0){
+    acquire(&shmem_state.lock);
+    if(shmem_state.regions[region].allocated){
+      shmem_state.regions[region].allocated = 0;
+      shmem_state.regions[region].refcount = 0;
+      shmem_state.regions[region].pa = 0;
+    }
+    release(&shmem_state.lock);
+    kfree(mem);
+    return 0;
+  }
+
+  sfence_vma();
+  return va;
+}
+
+int
+munmap(uint64 va)
+{
+  struct proc *p = myproc();
+  pte_t *pte;
+  uint64 pa;
+  int region;
+
+  if(!is_shmem_va(va))
+    return -1;
+
+  pte = walk(p->pagetable, va, 0);
+  if(pte == 0 || (*pte & PTE_V) == 0)
+    return -1;
+
+  pa = PTE2PA(*pte);
+  acquire(&shmem_state.lock);
+  region = find_shared_region_by_pa(pa);
+  release(&shmem_state.lock);
+  if(region < 0)
+    return -1;
+
+  uvmunmap(p->pagetable, va, 1, 1);
+  sfence_vma();
+  return 0;
+}
+
 // Make a direct-map page table for the kernel.
 pagetable_t
 kvmmake(void)
@@ -203,8 +335,29 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
       continue;   
     if((*pte & PTE_V) == 0)  // has physical page been allocated?
       continue;
+
+    uint64 pa = PTE2PA(*pte);
+    if(is_shmem_va(a)){
+      int region;
+      *pte = 0;
+      acquire(&shmem_state.lock);
+      region = find_shared_region_by_pa(pa);
+      if(region >= 0){
+        if(shmem_state.regions[region].refcount > 0)
+          shmem_state.regions[region].refcount--;
+        if(shmem_state.regions[region].refcount == 0){
+          kfree((void*)shmem_state.regions[region].pa);
+          shmem_state.regions[region].pa = 0;
+          shmem_state.regions[region].allocated = 0;
+        }
+      } else if(do_free){
+        kfree((void*)pa);
+      }
+      release(&shmem_state.lock);
+      continue;
+    }
+
     if(do_free){
-      uint64 pa = PTE2PA(*pte);
       kfree((void*)pa);
     }
     *pte = 0;
@@ -284,6 +437,7 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 {
   if(sz > 0)
     uvmunmap(pagetable, 0, PGROUNDUP(sz)/PGSIZE, 1);
+  uvmunmap(pagetable, SHMEM_BASE, SHMEM_MAX_REGIONS, 1);
   freewalk(pagetable);
 }
 
@@ -316,9 +470,36 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       goto err;
     }
   }
+
+  for(i = SHMEM_BASE; i < SHMEM_END; i += PGSIZE){
+    pte = walk(old, i, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0)
+      continue;
+
+    pa = PTE2PA(*pte);
+    flags = PTE_FLAGS(*pte);
+    acquire(&shmem_state.lock);
+    int region = find_shared_region_by_pa(pa);
+    if(region < 0){
+      release(&shmem_state.lock);
+      continue;
+    }
+    shmem_state.regions[region].refcount++;
+    release(&shmem_state.lock);
+
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
+      acquire(&shmem_state.lock);
+      if(shmem_state.regions[region].refcount > 0)
+        shmem_state.regions[region].refcount--;
+      release(&shmem_state.lock);
+      goto err;
+    }
+  }
+
   return 0;
 
  err:
+  uvmunmap(new, SHMEM_BASE, SHMEM_MAX_REGIONS, 1);
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
 }

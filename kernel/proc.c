@@ -7,6 +7,9 @@
 #include "getproc.h"
 #include "defs.h"
 
+#define SHMEM_MAX_REGIONS 32
+#define SHMEM_BASE (TRAPFRAME - SHMEM_MAX_REGIONS * PGSIZE)
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -242,7 +245,7 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
-    if(sz + n > TRAPFRAME) {
+    if(sz + n > SHMEM_BASE) {
       return -1;
     }
     if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
